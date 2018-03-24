@@ -1,0 +1,189 @@
+```{python imports, echo=False, results=False}
+import sys
+# Matt's path
+# sys.path.insert(0, 'C:\\Users\\mad221\\PycharmProjects\\nightlyCensus')
+# John's path
+sys.path.insert(0, 'C:/PyProjects/tester')
+import pickle
+import xgboost as xgb
+import pandas as pd
+import numpy as np
+import math
+import datetime
+import matplotlib.pyplot as plt
+import random
+```
+
+```{python load_data , echo=False, results=False}
+# load raw data
+data = pd.read_pickle('data/raw_data.p')
+
+
+# set target col
+model_name = 'data/GunViolence_xgb.model'
+target_col = 'race'
+
+
+# load preproccessed features
+features = xgb.DMatrix('data/xgb.features.data')
+
+# load transform
+with open('data/text_cat_transformer.p', 'rb') as f:
+    trans = pickle.load(f)
+features.feature_names = trans.feature_names
+
+all_ind = random.sample(range(data.shape[0]),data.shape[0])
+train_ind = all_ind[0:80000]
+test_ind = all_ind[80001:]
+
+all_target = [1 if data.loc[i,'race']=='Black' else 0 for i in range(data.shape[0])]
+train_target = [all_target[i] for i in train_ind]
+test_target = [all_target[i] for i in test_ind]
+train=features.slice(train_ind)
+train.set_label(train_target)
+test=features.slice(test_ind)
+test.set_label(test_target)
+test_raw = data.iloc[test_ind]
+train_raw = data.iloc[train_ind]
+
+#load model
+model = xgb.Booster()
+model.load_model(model_name)
+
+
+```
+
+```{python, predictions, echo=False,  results=False}
+
+import sklearn
+preds_test = model.predict(test)
+preds_train = model.predict(train)
+
+```
+#### Objective to Predict Amount of Total Charges For Each Patient Daily
+
+The objective of Total Charges model is to predict the total charges for a patient's stay each day. The training data for the model was developed from the MUSC inpatient data pipeline.  Details are in the repository readme.  A combination of semi structured and numeric data from updated each night including diagnosis, problem lists, and therapeutic classes was used to create dependent variables.
+
+#### Modeling Approach
+
+The text data was run through a tokenizer to build a bag of words representation, with stop words removed.  The modeling technique used was gradient boosted tree via the xgboost package.  The data was split by putting 75% of the Hars into training and 25% to the test set. The models were built by minimizing the RMSE of the regression fit.  L1 and L2 regularization grid search was used to optimize the model.
+
+
+
+#### Variables Considered
+
+The following variables were used to build the model.
+ The text columns are semi-structured and put into a bag of words model.
+ Categorical columns were one hot encoded.
+ All numeric variables were zero imputed when missing.
+
+```{python, variables, echo=False, results = 'tex'}
+# training variables
+print(trans.col_dict)
+# final number of features
+print('number of features : ', train.num_col() )
+```
+
+#### Holdout Set
+
+```{python, echo=False, results = 'tex'}
+print('testing rows : ', test.num_row())
+print('training rows : ', train.num_row())
+```
+
+
+
+##### Correlation Plots
+Here we have correlation plots for both the training and test data. R-squared is a statistical measure of how close the data are to the fitted regression line, i.e. measures correlation(linearity) of the model's prediction for Total Charges with the true observed value.
+
+```{python, fig = True, width=450, name = 'Correlation 1',echo=False, evaluate=True}
+from dataPreProc.plot_methods import plot_regress_corr
+title='Corr. Plot of Total Charges (Train)'
+plot_regress_corr(y_train, preds_train, dot_size=1,title=title)
+```
+
+```{python, fig = True, width=450, name = 'Correlations 2',echo=False, evaluate=True}
+title='Corr. Plot of Total Charges (Test)'
+plot_regress_corr(y_test, preds_test, dot_size=1,title=title)
+```
+
+
+
+
+#### Variable Importance
+The variable importance plots display the most important features by their information gain, which is a measurement that sums up how much 'information' a feature gives about the target variable. Information gain measures the reduction in entropy, or uncertainty, over each of the times that the given feature is split on.
+
+```{python, variable_importance, echo=False,results = 'hidden'}
+import matplotlib.pyplot as plt
+## Find which features are most important by f-score
+importances =model.get_score(importance_type='gain')
+importance_frame = pd.DataFrame({'Importance': list(importances.values()), 'Feature': list(importances.keys())})
+importance_frame.sort_values(by = 'Importance', inplace=True)
+importance_frame = importance_frame.tail(20)
+importance_frame.plot(x ='Feature', y='Importance' ,kind='barh',title="Importance Plot for Total Payments Model",legend=False )
+```
+
+
+##### SHAP Univariate Plots
+SHapley Additive exPlanations(SHAP) is an approach to explain the output of machine learning models. SHAP assigns a value to each feature for each prediction (i.e. feature attribution); the higher the value, the larger the feature’s attribution to the specific prediction. In cases of classification, a positive SHAP value indicates that a factor increases the value of the model's prediction(risk), whereas a negative SHAP value indicates that a factor decreases the value of the model's prediction. The sum of SHAP values over all features will approximately equal the model prediction for each observation. In the following plots blue points signify negative SHAP values(values of the feature associated with reducing risk for sepsis), red points have positive SHAP values(values of the feature associated with increasing risk for sepsis), and yellow points are values for which the feature attributes little to the prediction for Sepsis.
+```{python, fig = True, width=400, name = 'SHAP 1',echo=False, evaluate=True,results = 'hidden'}
+import shap
+import gc
+gc.enable()
+from dataPreProc.plot_methods import plot_shap_univar
+import random
+
+## generate samples for sensitivity plots( this needs to go before the importance_frame code )
+samp_size=10000
+rand_inds = np.sort(random.sample(range(data.shape[0]),samp_size))
+samp_data=trans.transform(data.iloc[rand_inds,:])
+shap_vals = model.predict(xgb.DMatrix(samp_data,feature_names=trans.feature_names),pred_contribs=True)
+samp_df = pd.DataFrame(samp_data.todense())
+samp_df.columns=trans.feature_names
+
+#### plot the shap univariate plot for a given column
+plt.figure()
+plot_shap_univar('CENSUS_DAYS', shap_vals, samp_df,feature_names = samp_df.columns,logged_col=False,xlim=(-1,100))
+```
+```{python, fig = True, width=400, name = 'SHAP 2',echo=False, evaluate=True}
+plt.figure()
+plot_shap_univar('TOTAL_ICU_DAYS', shap_vals, samp_df,feature_names = samp_df.columns,logged_col=False,xlim=(-1,100))
+```
+```{python, fig = True, width=400, name = 'SHAP 3',echo=False, evaluate=True}
+plt.figure()
+plot_shap_univar('SCHED_SURG_MIN_ACCUM', shap_vals, samp_df,feature_names = samp_df.columns,logged_col=False,xlim=(-5,500))
+```
+```{python, fig = True, width=400, name = 'SHAP 4',echo=False, evaluate=True}
+plt.figure()
+plot_shap_univar('ANESTHESIA_PROC_MIN_ACCUM', shap_vals, samp_df,feature_names = samp_df.columns,logged_col=False,xlim=(-6,700))
+```
+
+##### SHAP Summary Plot Over Categorical/Text Columns
+The following plot display the effect of the top text/category values on the Model's predictions. Red data points represent when the text/column feature is observed in a patient's records, whereas the blue represents when the feature is not observed.
+```{python, fig = True, name = 'SHAP Cat/Text Summary',echo=False, evaluate=True}
+
+# this section plots the SHAP summary plot using only categorical&text features from the important features above
+
+# pluck out the indices associated with each of the top features(from importance frame) into a list
+feature_inds = [np.where([feature == model.feature_names[i] for i in range(len(model.feature_names))])[0][0] for feature in importance_frame.Feature]+[1]
+# go through and find which of the top features are a text_col or cat_col.
+# this is achieved by eliminating all numeric(non text/cat) columns
+non_encoded_types = [col for col in list(trans.col_dict.keys()) if col not in ('text_cols','cat_cols')]
+# keeps track of which of the top features aren't encoded
+non_encoded_feats=[]
+for feature in importance_frame.Feature:
+    for type in non_encoded_types:
+        if feature in trans.col_dict.get(type):
+            non_encoded_feats.append(feature)
+
+# extract encoded_feats by elimnating the non-encoded features from the important features
+encoded_feats = [col for col in importance_frame.Feature if col not in non_encoded_feats]
+plt.figure()
+encoded_feat_inds = [np.where([feature == model.feature_names[i] for i in range(len(model.feature_names))])[0][0] for feature in encoded_feats]+[1]
+shap.summary_plot(shap_vals[:,encoded_feat_inds], samp_df.iloc[:,encoded_feat_inds])
+```
+
+
+
+
+
